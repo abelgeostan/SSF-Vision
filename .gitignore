@@ -5,3 +5,6 @@ __pycache__
 deep-person-reid
 ./videos
 videos
+./results
+results
+yolo8n.pt
