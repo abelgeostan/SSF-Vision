@@ -8,6 +8,12 @@ import time
 from datetime import datetime
 from PIL import Image, ImageTk
 from reid import ReIDEngine, AnalyticsEngine # Ensure AnalyticsEngine is in reid.py
+import os
+from dotenv import load_dotenv
+
+# load the .env file
+load_dotenv()
+
 
 # ==================== SETTINGS ====================
 MODEL_PATH = 'model/osnet_x0_75_imagenet.pth'
@@ -16,6 +22,8 @@ VIDEO_2 = "./videos/cam1.1.mp4"
 MATCHES_DIR = "matches"
 ANALYTICS_DIR = "analytics_output"
 ZONE_ALERTS_DIR = "zone_alerts"
+SUSPECT_FINDER_DIR = "suspect_results"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # Set your Groq API key here for suspect finder (optional)
 # ==================================================
 
 # ==================== THEME ====================
@@ -64,6 +72,13 @@ class SentinelVision(tk.Tk):
         self.match_results = []
         self.current_result_idx = 0
         self.search_complete = False
+        self._active_items = []
+        self._active_results_tab = "reid"
+
+        # Suspect Finder state
+        self.suspect_video_path = None
+        self.suspect_is_running = False
+        self.suspect_match_results = []
         
         # Zoom state for results viewer
         self.result_zoom_level = 1.0  # 1.0 = 100% fit to display
@@ -133,12 +148,14 @@ class SentinelVision(tk.Tk):
         self.analytics_page = tk.Frame(self.content, bg=BG_DARK)
         self.zone_page      = tk.Frame(self.content, bg=BG_DARK)
         self.results_page   = tk.Frame(self.content, bg=BG_DARK)
+        self.suspect_page   = tk.Frame(self.content, bg=BG_DARK)
 
         self._build_home_page()
         self._build_reid_page()
         self._build_analytics_page()
         self._build_zone_page()
         self._build_results_page()
+        self._build_suspect_page()
 
     def _build_sidebar(self):
         tk.Frame(self.sidebar, bg=BG_PANEL, height=20).pack()
@@ -150,6 +167,7 @@ class SentinelVision(tk.Tk):
             ("Analytics", "📊", "People Analytics"),
             ("Zones",     "🚫", "Restricted Zones"), # Add this
             ("Results",   "▦", "Match Results"),
+            ("Suspect",   "🔍", "Suspect Finder"),
         ]
         self.nav_btns = {}
         for key, icon, label in nav_items:
@@ -363,6 +381,7 @@ class SentinelVision(tk.Tk):
             ("PERSON RE-ID", "Identify and track specific targets across multiple camera feeds.", ACCENT_BLUE, "◉"),
             ("HEATMAP ANALYTICS", "Visualize crowd density, traffic flow, and loitering hotspots.", ACCENT_AMBER, "📊"),
             ("RESTRICTED ZONES", "Define virtual boundaries and trigger instant intrusion alerts.", ACCENT_RED, "🚫"),
+            ("SUSPECT FINDER",   "Search footage for a person matching a natural language description.", ACCENT_BLUE, "🔍"),
         ]
 
         for title, desc, color, icon in modules:
@@ -391,6 +410,7 @@ class SentinelVision(tk.Tk):
             ("Launch Re-ID Engine", "ReID", ACCENT_BLUE),
             ("Open Heatmap Dashboard", "Analytics", ACCENT_AMBER),
             ("Configure Security Zones", "Zones", ACCENT_RED),
+            ("Suspect Finder", "Suspect", ACCENT_BLUE),
             ("View Search Results", "Results", TEXT_SECONDARY)
         ]
 
@@ -496,26 +516,61 @@ class SentinelVision(tk.Tk):
         self.after(200, self._update_gallery_bars)
 
     # ------------------------------------------------------------------ #
-    #  RESULTS PAGE                                                        #
+    #  RESULTS PAGE  (multi-tab: ReID · Zones · Heatmaps)                 #
     # ------------------------------------------------------------------ #
     def _build_results_page(self):
         p = self.results_page
 
-        # Header
+        # ── Page header ──────────────────────────────────────────────────
         hdr = tk.Frame(p, bg=BG_DARK)
-        hdr.pack(fill="x", padx=25, pady=(20, 10))
-        tk.Label(hdr, text="MATCH RESULTS VIEWER",
+        hdr.pack(fill="x", padx=25, pady=(20, 0))
+        tk.Label(hdr, text="RESULTS ARCHIVE",
                  font=("Courier New", 16, "bold"), fg=TEXT_PRIMARY, bg=BG_DARK).pack(side="left")
         self.result_counter_lbl = tk.Label(hdr, text="", font=("Courier New", 10),
                                             fg=TEXT_SECONDARY, bg=BG_DARK)
         self.result_counter_lbl.pack(side="right")
-        tk.Frame(p, bg=BORDER, height=1).pack(fill="x", padx=25)
+        tk.Frame(p, bg=BORDER, height=1).pack(fill="x", padx=25, pady=(10, 0))
 
-        # Main content
+        # ── Tab bar ──────────────────────────────────────────────────────
+        self._active_results_tab = "reid"   # "reid" | "zones" | "heatmaps"
+
+        tab_bar = tk.Frame(p, bg=BG_PANEL, height=42)
+        tab_bar.pack(fill="x", padx=25, pady=(0, 0))
+        tab_bar.pack_propagate(False)
+
+        self._tab_btns = {}
+        tab_defs = [
+            ("reid",     "◉  PERSON RE-ID",     ACCENT_CYAN),
+            ("zones",    "🚫  ZONE ALERTS",      ACCENT_RED),
+            ("heatmaps", "📊  HEATMAP REPORTS",  ACCENT_AMBER),
+            ("suspect",  "🔍  SUSPECT FINDER",   ACCENT_BLUE),
+        ]
+        for key, label, color in tab_defs:
+            btn = tk.Button(tab_bar, text=label,
+                            font=("Courier New", 10, "bold"),
+                            bg=BG_SURFACE if key == "reid" else BG_PANEL,
+                            fg=color if key == "reid" else TEXT_SECONDARY,
+                            relief="flat", cursor="hand2",
+                            padx=20, pady=10,
+                            command=lambda k=key: self._switch_results_tab(k))
+            btn.pack(side="left")
+            self._tab_btns[key] = btn
+
+        # Refresh button on the right
+        tk.Button(tab_bar, text="↺  REFRESH FROM DISK",
+                  font=("Courier New", 9, "bold"),
+                  bg=BG_PANEL, fg=TEXT_DIM,
+                  relief="flat", cursor="hand2",
+                  padx=14, pady=10,
+                  command=self._refresh_results_page).pack(side="right")
+
+        tk.Frame(p, bg=BORDER_BRIGHT, height=1).pack(fill="x", padx=25)
+
+        # ── Main content ─────────────────────────────────────────────────
         main = tk.Frame(p, bg=BG_DARK)
-        main.pack(fill="both", expand=True, padx=25, pady=20)
+        main.pack(fill="both", expand=True, padx=25, pady=12)
 
-        # Left: Image viewer
+        # Left: image / report viewer ────────────────────────────────────
         left = tk.Frame(main, bg=BG_DARK)
         left.pack(side="left", fill="both", expand=True)
 
@@ -525,32 +580,31 @@ class SentinelVision(tk.Tk):
 
         img_topbar = tk.Frame(img_card, bg=BG_SURFACE)
         img_topbar.pack(fill="x")
-        tk.Label(img_topbar, text="▦ MATCH PREVIEW",
-                 font=("Courier New", 9, "bold"), fg=ACCENT_CYAN,
-                 bg=BG_SURFACE).pack(side="left", padx=12, pady=6)
+        self.result_preview_title = tk.Label(img_topbar, text="▦  MATCH PREVIEW",
+                 font=("Courier New", 9, "bold"), fg=ACCENT_CYAN, bg=BG_SURFACE)
+        self.result_preview_title.pack(side="left", padx=12, pady=6)
 
         self.result_img_lbl = tk.Label(img_card, bg="#040810",
-                                        text="[ NO RESULTS ]",
+                                        text="[ SELECT A TAB TO VIEW RESULTS ]",
                                         font=("Courier New", 14), fg=TEXT_DIM)
         self.result_img_lbl.pack(fill="both", expand=True, padx=8, pady=8)
-        
-        # Bind keyboard shortcuts for zoom
-        self.result_img_lbl.bind("<Key-plus>", lambda e: self.zoom_in_result())
-        self.result_img_lbl.bind("<Key-minus>", lambda e: self.zoom_out_result())
-        self.result_img_lbl.bind("<Key-equal>", lambda e: self.zoom_in_result())  # Shift+= on US keyboard
-        self.result_img_lbl.bind("<MouseWheel>", self._on_results_mousewheel)  # Windows scroll
-        self.result_img_lbl.bind("<Button-4>", self._on_results_mousewheel)  # Linux scroll up
-        self.result_img_lbl.bind("<Button-5>", self._on_results_mousewheel)  # Linux scroll down
+
+        # Zoom bindings
+        self.result_img_lbl.bind("<Key-plus>",    lambda e: self.zoom_in_result())
+        self.result_img_lbl.bind("<Key-minus>",   lambda e: self.zoom_out_result())
+        self.result_img_lbl.bind("<Key-equal>",   lambda e: self.zoom_in_result())
+        self.result_img_lbl.bind("<MouseWheel>",  self._on_results_mousewheel)
+        self.result_img_lbl.bind("<Button-4>",    self._on_results_mousewheel)
+        self.result_img_lbl.bind("<Button-5>",    self._on_results_mousewheel)
 
         # Nav bar
         nav_bar = tk.Frame(left, bg=BG_DARK)
-        nav_bar.pack(fill="x", pady=(12, 0))
+        nav_bar.pack(fill="x", pady=(10, 0))
 
         self.prev_btn = tk.Button(nav_bar, text="◀  PREVIOUS",
                                    font=("Courier New", 11, "bold"),
-                                   bg=BG_CARD, fg=TEXT_PRIMARY,
-                                   relief="flat", cursor="hand2",
-                                   pady=10, padx=20,
+                                   bg=BG_CARD, fg=TEXT_PRIMARY, relief="flat",
+                                   cursor="hand2", pady=10, padx=20,
                                    highlightbackground=BORDER, highlightthickness=1,
                                    command=self.show_prev_result)
         self.prev_btn.pack(side="left")
@@ -562,14 +616,13 @@ class SentinelVision(tk.Tk):
 
         self.next_btn = tk.Button(nav_bar, text="NEXT  ▶",
                                    font=("Courier New", 11, "bold"),
-                                   bg=BG_CARD, fg=TEXT_PRIMARY,
-                                   relief="flat", cursor="hand2",
-                                   pady=10, padx=20,
+                                   bg=BG_CARD, fg=TEXT_PRIMARY, relief="flat",
+                                   cursor="hand2", pady=10, padx=20,
                                    highlightbackground=BORDER, highlightthickness=1,
                                    command=self.show_next_result)
         self.next_btn.pack(side="right")
 
-        # --- ZOOM CONTROLS ROW ---
+        # Zoom bar
         zoom_bar = tk.Frame(left, bg=BG_DARK)
         zoom_bar.pack(fill="x", pady=(8, 0))
 
@@ -578,9 +631,8 @@ class SentinelVision(tk.Tk):
 
         self.zoom_out_btn = tk.Button(zoom_bar, text="−  ZOOM OUT",
                                         font=("Courier New", 10, "bold"),
-                                        bg=BG_CARD, fg=TEXT_PRIMARY,
-                                        relief="flat", cursor="hand2",
-                                        pady=8, padx=15,
+                                        bg=BG_CARD, fg=TEXT_PRIMARY, relief="flat",
+                                        cursor="hand2", pady=8, padx=15,
                                         highlightbackground=BORDER, highlightthickness=1,
                                         command=self.zoom_out_result)
         self.zoom_out_btn.pack(side="left", padx=5)
@@ -592,31 +644,58 @@ class SentinelVision(tk.Tk):
 
         self.zoom_in_btn = tk.Button(zoom_bar, text="ZOOM IN  +",
                                        font=("Courier New", 10, "bold"),
-                                       bg=BG_CARD, fg=TEXT_PRIMARY,
-                                       relief="flat", cursor="hand2",
-                                       pady=8, padx=15,
+                                       bg=BG_CARD, fg=TEXT_PRIMARY, relief="flat",
+                                       cursor="hand2", pady=8, padx=15,
                                        highlightbackground=BORDER, highlightthickness=1,
                                        command=self.zoom_in_result)
         self.zoom_in_btn.pack(side="left", padx=5)
 
         self.reset_zoom_btn = tk.Button(zoom_bar, text="RESET",
                                           font=("Courier New", 10, "bold"),
-                                          bg=BG_CARD, fg=TEXT_SECONDARY,
-                                          relief="flat", cursor="hand2",
-                                          pady=8, padx=12,
+                                          bg=BG_CARD, fg=TEXT_SECONDARY, relief="flat",
+                                          cursor="hand2", pady=8, padx=12,
                                           highlightbackground=BORDER, highlightthickness=1,
                                           command=self.reset_zoom)
         self.reset_zoom_btn.pack(side="left", padx=5)
 
-        # Right: Metadata panel
+        # Right: metadata panel ──────────────────────────────────────────
         right = tk.Frame(main, bg=BG_DARK, width=300)
         right.pack(side="right", fill="y", padx=(20, 0))
         right.pack_propagate(False)
 
+        # ── Tab summary card ─────────────────────────────────────────────
+        tab_summary = tk.Frame(right, bg=BG_CARD, highlightbackground=BORDER,
+                               highlightthickness=1)
+        tab_summary.pack(fill="x", pady=(0, 12))
+        tk.Label(tab_summary, text="MODULE TOTALS",
+                 font=("Courier New", 9, "bold"), fg=TEXT_SECONDARY,
+                 bg=BG_SURFACE).pack(fill="x", padx=12, pady=6)
+
+        ts_inner = tk.Frame(tab_summary, bg=BG_CARD)
+        ts_inner.pack(fill="x", padx=12, pady=8)
+
+        self._tab_count_labels = {}
+        tab_count_defs = [
+            ("reid",     "◉ PERSON RE-ID",    ACCENT_CYAN),
+            ("zones",    "🚫 ZONE ALERTS",     ACCENT_RED),
+            ("heatmaps", "📊 HEATMAP REPORTS", ACCENT_AMBER),
+            ("suspect",  "🔍 SUSPECT FINDER",  ACCENT_BLUE),
+        ]
+        for key, label, color in tab_count_defs:
+            row = tk.Frame(ts_inner, bg=BG_CARD)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=label, font=("Courier New", 8, "bold"),
+                     fg=color, bg=BG_CARD).pack(side="left")
+            cnt = tk.Label(row, text="0", font=("Courier New", 10, "bold"),
+                           fg=TEXT_PRIMARY, bg=BG_CARD)
+            cnt.pack(side="right")
+            self._tab_count_labels[key] = cnt
+
+        # ── Match metadata card ──────────────────────────────────────────
         meta_card = tk.Frame(right, bg=BG_CARD, highlightbackground=BORDER,
                              highlightthickness=1)
         meta_card.pack(fill="x", pady=(0, 12))
-        tk.Label(meta_card, text="MATCH METADATA",
+        tk.Label(meta_card, text="ITEM METADATA",
                  font=("Courier New", 9, "bold"), fg=TEXT_SECONDARY,
                  bg=BG_SURFACE).pack(fill="x", padx=12, pady=6)
 
@@ -624,8 +703,11 @@ class SentinelVision(tk.Tk):
         meta_inner.pack(fill="x", padx=12, pady=12)
 
         self.meta_fields = {}
-        for key, label in [("video", "SOURCE FILE"), ("timestamp", "TIMESTAMP"),
-                            ("index", "MATCH INDEX"), ("saved", "SAVED TO")]:
+        for key, label in [("source",    "SOURCE"),
+                            ("timestamp", "TIMESTAMP"),
+                            ("index",     "ITEM INDEX"),
+                            ("saved",     "FILE NAME"),
+                            ("type",      "RESULT TYPE")]:
             tk.Label(meta_inner, text=label, font=("Courier New", 8, "bold"),
                      fg=TEXT_DIM, bg=BG_CARD).pack(anchor="w", pady=(6, 0))
             val_lbl = tk.Label(meta_inner, text="—", font=("Courier New", 10),
@@ -634,7 +716,10 @@ class SentinelVision(tk.Tk):
             val_lbl.pack(anchor="w")
             self.meta_fields[key] = val_lbl
 
-        # Summary card
+        # Backwards-compatible alias used elsewhere in code
+        self.meta_fields["video"] = self.meta_fields["source"]
+
+        # ── Session summary (ReID-specific) ──────────────────────────────
         summary_card = tk.Frame(right, bg=BG_CARD, highlightbackground=BORDER,
                                 highlightthickness=1)
         summary_card.pack(fill="x", pady=(0, 12))
@@ -646,13 +731,13 @@ class SentinelVision(tk.Tk):
         sum_inner.pack(fill="x", padx=12, pady=12)
 
         for key, label in [("total_matches", "TOTAL MATCHES"),
-                            ("save_dir", "SAVE DIRECTORY"),
-                            ("threshold", "MATCH THRESHOLD")]:
+                            ("save_dir",      "SAVE DIRECTORY"),
+                            ("threshold",     "MATCH THRESHOLD")]:
             tk.Label(sum_inner, text=label, font=("Courier New", 8, "bold"),
                      fg=TEXT_DIM, bg=BG_CARD).pack(anchor="w", pady=(6, 0))
             val = {"total_matches": "0",
-                   "save_dir": f"./{MATCHES_DIR}/",
-                   "threshold": "> 0.75 cosine sim"}.get(key, "—")
+                   "save_dir":      f"./{MATCHES_DIR}/",
+                   "threshold":     "> 0.75 cosine sim"}.get(key, "—")
             lbl = tk.Label(sum_inner, text=val, font=("Courier New", 10),
                            fg=TEXT_PRIMARY, bg=BG_CARD, anchor="w")
             lbl.pack(anchor="w")
@@ -662,18 +747,141 @@ class SentinelVision(tk.Tk):
         # Back button
         tk.Button(right, text="◀  BACK TO TRACKING",
                   font=("Courier New", 10, "bold"),
-                  bg=BG_CARD, fg=TEXT_SECONDARY,
-                  relief="flat", cursor="hand2",
-                  pady=10,
+                  bg=BG_CARD, fg=TEXT_SECONDARY, relief="flat",
+                  cursor="hand2", pady=10,
                   highlightbackground=BORDER, highlightthickness=1,
                   command=lambda: self.show_page("ReID")).pack(fill="x")
+
+    # ── Tab switching ────────────────────────────────────────────────────
+    def _switch_results_tab(self, tab_key):
+        """Switch active results tab and reload items."""
+        self._active_results_tab = tab_key
+        tab_colors = {"reid": ACCENT_CYAN, "zones": ACCENT_RED, "heatmaps": ACCENT_AMBER, "suspect": ACCENT_BLUE}
+
+        for k, btn in self._tab_btns.items():
+            active = (k == tab_key)
+            btn.config(bg=BG_SURFACE if active else BG_PANEL,
+                       fg=tab_colors[k] if active else TEXT_SECONDARY)
+
+        # Update preview title accent
+        self.result_preview_title.config(fg=tab_colors.get(tab_key, ACCENT_CYAN))
+
+        self._load_tab_items(tab_key)
+
+    def _load_tab_items(self, tab_key):
+        """Scan the appropriate directory and populate self._active_items."""
+        if tab_key == "reid":
+            items = self._scan_reid_results()
+            type_label = "Person Re-ID Match"
+            dir_label = f"./{MATCHES_DIR}/"
+        elif tab_key == "zones":
+            items = self._scan_zone_results()
+            type_label = "Zone Intrusion Alert"
+            dir_label = f"./{ZONE_ALERTS_DIR}/"
+        elif tab_key == "suspect":
+            items = self._scan_suspect_results()
+            type_label = "Suspect Finder Match"
+            dir_label = f"./{SUSPECT_FINDER_DIR}/"
+        else:  # heatmaps
+            items = self._scan_heatmap_results()
+            type_label = "Heatmap / Analytics Report"
+            dir_label = f"./{ANALYTICS_DIR}/"
+
+        self._active_items = items  # list of (filepath, source_label, timestamp_str)
+        self.current_result_idx = 0
+
+        total = len(items)
+        self._tab_count_labels[tab_key].config(text=str(total))
+        self.result_counter_lbl.config(text=f"{total} result(s)")
+        self.results_total_lbl.config(text=str(total))
+        self.meta_fields["type"].config(text=type_label)
+
+        if total == 0:
+            self.result_img_lbl.config(image="", text=f"[ NO {tab_key.upper()} RESULTS FOUND ]")
+            self.nav_pos_lbl.config(text="0 / 0")
+            for k, f in self.meta_fields.items():
+                if k not in ("type",):
+                    f.config(text="—")
+            self.zoom_lbl.config(text="—")
+            return
+
+        self._show_active_item(0)
+        self.result_img_lbl.focus_set()
+
+    # ── Directory scanners ───────────────────────────────────────────────
+    def _scan_reid_results(self):
+        """Return in-memory matches first; fall back to disk scan."""
+        if self.match_results:
+            return list(self.match_results)   # (filepath, video_name, timestamp)
+        return self._scan_images_in_dir(MATCHES_DIR)
+
+    def _scan_zone_results(self):
+        """Recursively find all zone alert images, paired with their JSON."""
+        items = []
+        if not os.path.isdir(ZONE_ALERTS_DIR):
+            return items
+        for root, dirs, files in os.walk(ZONE_ALERTS_DIR):
+            for fname in sorted(files):
+                if fname.lower().endswith((".jpg", ".png", ".jpeg")):
+                    fpath = os.path.join(root, fname)
+                    # Try to load accompanying JSON for metadata
+                    json_path = fpath.rsplit(".", 1)[0] + ".json"
+                    ts = "—"
+                    source = os.path.basename(root)
+                    if os.path.isfile(json_path):
+                        try:
+                            import json as _json
+                            with open(json_path) as jf:
+                                meta = _json.load(jf)
+                            ts = meta.get("timestamp", ts)
+                            source = meta.get("alert_message", source)[:40]
+                        except Exception:
+                            pass
+                    items.append((fpath, source, ts))
+        return items
+
+    def _scan_heatmap_results(self):
+        """Return all PNG/JPG files in analytics_output."""
+        return self._scan_images_in_dir(ANALYTICS_DIR)
+
+    def _scan_suspect_results(self):
+        """Return in-memory suspect matches first; fall back to disk scan of suspect_results/."""
+        if hasattr(self, 'suspect_match_results') and self.suspect_match_results:
+            items = []
+            for r in self.suspect_match_results:
+                # r is a MatchResult from suspect_finder.py
+                # Reconstruct the saved filepath
+                fname = f"suspect_{self.suspect_match_results.index(r)+1:04d}_f{r.frame_num}_s{r.overall_score:.2f}.jpg"
+                fpath = os.path.join(SUSPECT_FINDER_DIR, fname)
+                from datetime import timedelta
+                ts = str(timedelta(seconds=int(r.timestamp)))
+                score_str = f"Score {r.overall_score:.0%}  |  Frame {r.frame_num}  |  {ts}"
+                items.append((fpath, score_str, ts))
+            # Filter to only files that actually exist on disk
+            items = [(fp, src, ts) for fp, src, ts in items if os.path.isfile(fp)]
+            if items:
+                return items
+        return self._scan_images_in_dir(SUSPECT_FINDER_DIR)
+
+    def _scan_images_in_dir(self, directory):
+        """Generic scan: returns list of (filepath, dir_name, mtime_str)."""
+        items = []
+        if not os.path.isdir(directory):
+            return items
+        for fname in sorted(os.listdir(directory)):
+            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                fpath = os.path.join(directory, fname)
+                mtime = os.path.getmtime(fpath)
+                ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                items.append((fpath, directory, ts))
+        return items
         
     def show_page(self, name):
         self.is_running = False # Gracefully stop active threads
         
         # Hide all frames
-        for page in [self.home_page, self.reid_page, self.analytics_page, 
-                     self.zone_page, self.results_page]:
+        for page in [self.home_page, self.reid_page, self.analytics_page,
+                     self.zone_page, self.results_page, self.suspect_page]:
             page.pack_forget()
 
         self._set_active_nav(name)
@@ -690,6 +898,8 @@ class SentinelVision(tk.Tk):
         elif name == "Results": 
             self.results_page.pack(fill="both", expand=True)
             self._refresh_results_page()
+        elif name == "Suspect":
+            self.suspect_page.pack(fill="both", expand=True)
     # ------------------------------------------------------------------ #
     #  CLICK HANDLING                                                      #
     # ------------------------------------------------------------------ #
@@ -833,8 +1043,9 @@ class SentinelVision(tk.Tk):
         self.stop_reid_btn.config(state="disabled")
 
         if total > 0:
-            # Show View Results button on reid page
-            self.reid_results_btn.pack(fill="x", pady=(10, 0))
+            # Show View Results button on reid page (only if it exists)
+            if hasattr(self, 'reid_results_btn'):
+                self.reid_results_btn.pack(fill="x", pady=(10, 0))
             # Show in sidebar
             self.view_results_btn.pack(fill="x", padx=10, pady=8)
 
@@ -862,53 +1073,48 @@ class SentinelVision(tk.Tk):
     #  RESULTS VIEWER                                                      #
     # ------------------------------------------------------------------ #
     def _refresh_results_page(self):
-        total = len(self.match_results)
-        self.results_total_lbl.config(text=str(total))
-        if total == 0:
-            self.result_img_lbl.config(image="", text="[ NO MATCHES FOUND ]")
-            self.nav_pos_lbl.config(text="0 / 0")
-            self.result_counter_lbl.config(text="0 results")
-            for f in self.meta_fields.values():
-                f.config(text="—")
-            self.zoom_lbl.config(text="—")
-            return
+        """Called when navigating to the Results page — refresh active tab."""
+        if not hasattr(self, '_active_results_tab'):
+            self._active_results_tab = "reid"
+        if not hasattr(self, '_active_items'):
+            self._active_items = []
+        # Update all tab counts
+        self._tab_count_labels["reid"].config(text=str(len(self._scan_reid_results())))
+        self._tab_count_labels["zones"].config(text=str(len(self._scan_zone_results())))
+        self._tab_count_labels["heatmaps"].config(text=str(len(self._scan_heatmap_results())))
+        self._tab_count_labels["suspect"].config(text=str(len(self._scan_suspect_results())))
+        # Load the currently active tab
+        self._load_tab_items(self._active_results_tab)
 
-        self.current_result_idx = 0
-        self.result_counter_lbl.config(text=f"{total} result(s)")
-        self._show_result(0)
-        # Focus on image for keyboard shortcuts
-        self.result_img_lbl.focus_set()
-
-    def _show_result(self, idx):
-        if not self.match_results:
+    def _show_active_item(self, idx):
+        """Display item at idx from self._active_items."""
+        items = self._active_items
+        if not items:
             return
-        idx = max(0, min(idx, len(self.match_results) - 1))
+        idx = max(0, min(idx, len(items) - 1))
         self.current_result_idx = idx
-
-        filepath, video_name, timestamp = self.match_results[idx]
-
-        # Load image
+        filepath, source_label, timestamp = items[idx]
         try:
             img = Image.open(filepath)
-            self.result_original_image = img.copy()  # Store original
-            self.result_zoom_level = 1.0  # Reset zoom
+            self.result_original_image = img.copy()
+            self.result_zoom_level = 1.0
             self._update_result_display()
         except Exception as e:
-            self.result_img_lbl.config(image="", text=f"[ Error loading image: {e} ]")
-
-        # Update metadata
-        total = len(self.match_results)
-        self.meta_fields["video"].config(text=video_name)
+            self.result_img_lbl.config(image="", text=f"[ Error: {e} ]")
+        total = len(items)
+        self.meta_fields["source"].config(text=source_label, wraplength=240)
         self.meta_fields["timestamp"].config(text=timestamp, fg=ACCENT_CYAN)
         self.meta_fields["index"].config(text=f"#{idx + 1} of {total}")
         self.meta_fields["saved"].config(text=os.path.basename(filepath), fg=ACCENT_GREEN)
         self.nav_pos_lbl.config(text=f"{idx + 1} / {total}")
-
-        # Button states
         self.prev_btn.config(fg=TEXT_PRIMARY if idx > 0 else TEXT_DIM,
                               state="normal" if idx > 0 else "disabled")
         self.next_btn.config(fg=TEXT_PRIMARY if idx < total - 1 else TEXT_DIM,
                               state="normal" if idx < total - 1 else "disabled")
+
+    def _show_result(self, idx):
+        """Backwards-compatible alias."""
+        self._show_active_item(idx)
 
     def _update_result_display(self):
         """Render the image with current zoom level."""
@@ -1241,6 +1447,459 @@ class SentinelVision(tk.Tk):
         
         self.temp_points = []
         self.zone_ai_active = False  # Toggle between drawing and monitoring modes
+
+
+    # ================================================================== #
+    #  SUSPECT FINDER PAGE                                                #
+    # ================================================================== #
+    def _build_suspect_page(self):
+        p = self.suspect_page
+
+        # Header
+        hdr = tk.Frame(p, bg=BG_DARK)
+        hdr.pack(fill="x", padx=25, pady=(20, 10))
+        tk.Label(hdr, text="SUSPECT FINDER", font=("Courier New", 16, "bold"),
+                 fg=TEXT_PRIMARY, bg=BG_DARK).pack(side="left")
+        self.suspect_phase_lbl = tk.Label(hdr, text="[ IDLE ]",
+                                          font=("Courier New", 10, "bold"),
+                                          fg=TEXT_DIM, bg=BG_DARK)
+        self.suspect_phase_lbl.pack(side="right")
+        tk.Frame(p, bg=BORDER, height=1).pack(fill="x", padx=25)
+
+        cols = tk.Frame(p, bg=BG_DARK)
+        cols.pack(fill="both", expand=True, padx=25, pady=15)
+
+        # ── RIGHT SIDEBAR ──────────────────────────────────────────────
+        right = tk.Frame(cols, bg=BG_DARK, width=320)
+        right.pack(side="right", fill="y", padx=(15, 0))
+        right.pack_propagate(False)
+
+        # ── BUTTONS always anchored at the bottom first ─────────────────
+        btn_frame = tk.Frame(right, bg=BG_DARK)
+        btn_frame.pack(side="bottom", fill="x", pady=(6, 4))
+
+        self.suspect_stop_btn = tk.Button(btn_frame, text="■  STOP SEARCH",
+                                          font=self.font_btn, bg=ACCENT_RED,
+                                          fg=TEXT_PRIMARY, pady=11,
+                                          state="disabled",
+                                          command=self._suspect_stop)
+        self.suspect_stop_btn.pack(fill="x", pady=(0, 6))
+
+        self.suspect_start_btn = tk.Button(btn_frame, text="🔍  START SEARCH",
+                                           font=self.font_btn, bg=ACCENT_AMBER,
+                                           fg=BG_DARK, pady=11,
+                                           command=self._suspect_start)
+        self.suspect_start_btn.pack(fill="x")
+
+        # ── Scrollable area for all controls above buttons ──────────────
+        ctrl_canvas = tk.Canvas(right, bg=BG_DARK, highlightthickness=0)
+        ctrl_scroll = tk.Scrollbar(right, orient="vertical",
+                                   command=ctrl_canvas.yview)
+        ctrl_canvas.configure(yscrollcommand=ctrl_scroll.set)
+        # Don't show scrollbar unless needed — pack canvas only
+        ctrl_canvas.pack(side="top", fill="both", expand=True)
+
+        ctrl_inner = tk.Frame(ctrl_canvas, bg=BG_DARK)
+        ctrl_canvas.create_window((0, 0), window=ctrl_inner, anchor="nw")
+        ctrl_inner.bind("<Configure>",
+            lambda e: ctrl_canvas.configure(
+                scrollregion=ctrl_canvas.bbox("all")))
+        # Mouse-wheel scrolling
+        def _mw(e):
+            ctrl_canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+        ctrl_canvas.bind_all("<MouseWheel>", _mw)
+
+        # Use ctrl_inner as parent for all cards from here on
+        right = ctrl_inner  # rebind local name
+
+        # Source selection
+        src_card = tk.Frame(right, bg=BG_CARD, highlightthickness=1,
+                            highlightbackground=BORDER)
+        src_card.pack(fill="x", pady=(0, 10))
+        tk.Label(src_card, text="VIDEO SOURCE", font=self.font_mono,
+                 fg=TEXT_SECONDARY, bg=BG_SURFACE).pack(fill="x", pady=6)
+        src_inner = tk.Frame(src_card, bg=BG_CARD)
+        src_inner.pack(fill="x", padx=10, pady=8)
+
+        tk.Button(src_inner, text="📁  LOAD VIDEO FILE", font=self.font_btn,
+                  bg=BG_SURFACE, fg=TEXT_PRIMARY, relief="flat", cursor="hand2",
+                  pady=9, command=self._suspect_load_video).pack(fill="x", pady=(0, 6))
+        tk.Button(src_inner, text="📷  USE WEBCAM", font=self.font_btn,
+                  bg=BG_SURFACE, fg=TEXT_PRIMARY, relief="flat", cursor="hand2",
+                  pady=9, command=lambda: self._suspect_set_source(0)).pack(fill="x")
+
+        self.suspect_source_lbl = tk.Label(src_card, text="No source selected",
+                                           font=("Courier New", 8), fg=TEXT_DIM,
+                                           bg=BG_CARD, wraplength=280)
+        self.suspect_source_lbl.pack(pady=(0, 8))
+
+        # Description input
+        desc_card = tk.Frame(right, bg=BG_CARD, highlightthickness=1,
+                             highlightbackground=BORDER)
+        desc_card.pack(fill="x", pady=(0, 10))
+        tk.Label(desc_card, text="SUSPECT DESCRIPTION", font=self.font_mono,
+                 fg=TEXT_SECONDARY, bg=BG_SURFACE).pack(fill="x", pady=6)
+        desc_inner = tk.Frame(desc_card, bg=BG_CARD)
+        desc_inner.pack(fill="x", padx=10, pady=8)
+
+        tk.Label(desc_inner, text="Describe clothing, accessories, colours:",
+                 font=("Courier New", 8), fg=TEXT_SECONDARY, bg=BG_CARD).pack(anchor="w")
+
+        self.suspect_desc_text = tk.Text(desc_inner, height=4, width=30,
+                                         bg=BG_SURFACE, fg=TEXT_PRIMARY,
+                                         font=("Courier New", 10),
+                                         insertbackground=ACCENT_CYAN,
+                                         relief="flat",
+                                         highlightthickness=1,
+                                         highlightbackground=BORDER_BRIGHT,
+                                         wrap="word")
+        self.suspect_desc_text.pack(fill="x", pady=(6, 0))
+        self.suspect_desc_text.insert("1.0", "e.g. blue jacket, black pants, brown bag")
+        self.suspect_desc_text.bind("<FocusIn>", self._suspect_clear_placeholder)
+
+        # Settings
+        cfg_card = tk.Frame(right, bg=BG_CARD, highlightthickness=1,
+                            highlightbackground=BORDER)
+        cfg_card.pack(fill="x", pady=(0, 10))
+        tk.Label(cfg_card, text="SEARCH SETTINGS", font=self.font_mono,
+                 fg=TEXT_SECONDARY, bg=BG_SURFACE).pack(fill="x", pady=6)
+        cfg_inner = tk.Frame(cfg_card, bg=BG_CARD)
+        cfg_inner.pack(fill="x", padx=10, pady=8)
+
+        # Threshold slider
+        tk.Label(cfg_inner, text="MATCH SENSITIVITY", font=("Courier New", 8, "bold"),
+                 fg=TEXT_DIM, bg=BG_CARD).pack(anchor="w")
+        thresh_row = tk.Frame(cfg_inner, bg=BG_CARD)
+        thresh_row.pack(fill="x", pady=(4, 8))
+        self.suspect_thresh_var = tk.DoubleVar(value=0.70)
+        thresh_slider = tk.Scale(thresh_row, from_=0.10, to=0.90,
+                                 resolution=0.01, orient="horizontal",
+                                 variable=self.suspect_thresh_var,
+                                 bg=BG_CARD, fg=TEXT_PRIMARY,
+                                 troughcolor=BG_SURFACE,
+                                 highlightthickness=0,
+                                 showvalue=True, length=200)
+        thresh_slider.pack(side="left")
+
+        # Frame skip
+        tk.Label(cfg_inner, text="FRAME SKIP (1=every frame, 5=every 5th)",
+                 font=("Courier New", 8, "bold"), fg=TEXT_DIM, bg=BG_CARD).pack(anchor="w")
+        self.suspect_skip_var = tk.IntVar(value=5)
+        skip_slider = tk.Scale(cfg_inner, from_=1, to=15,
+                               resolution=1, orient="horizontal",
+                               variable=self.suspect_skip_var,
+                               bg=BG_CARD, fg=TEXT_PRIMARY,
+                               troughcolor=BG_SURFACE,
+                               highlightthickness=0,
+                               showvalue=True, length=200)
+        skip_slider.pack(anchor="w")
+
+        # Progress bar
+        prog_card = tk.Frame(right, bg=BG_CARD, highlightthickness=1,
+                             highlightbackground=BORDER)
+        prog_card.pack(fill="x", pady=(0, 10))
+        tk.Label(prog_card, text="SEARCH PROGRESS", font=self.font_mono,
+                 fg=TEXT_SECONDARY, bg=BG_SURFACE).pack(fill="x", pady=6)
+        self.suspect_prog = ttk.Progressbar(prog_card, orient="horizontal",
+                                            mode="determinate")
+        self.suspect_prog.pack(fill="x", padx=12, pady=(4, 2))
+        self.suspect_prog_lbl = tk.Label(prog_card, text="0%",
+                                         font=self.font_mono, fg=TEXT_DIM,
+                                         bg=BG_CARD)
+        self.suspect_prog_lbl.pack(pady=(0, 6))
+
+        # Match count
+        mc_card = tk.Frame(right, bg=BG_CARD, highlightthickness=1,
+                           highlightbackground=BORDER)
+        mc_card.pack(fill="x", pady=(0, 10))
+        tk.Label(mc_card, text="SUSPECTS FOUND", font=self.font_mono,
+                 fg=TEXT_SECONDARY, bg=BG_SURFACE).pack(fill="x", pady=6)
+        self.suspect_count_lbl = tk.Label(mc_card, text="0",
+                                          font=("Courier New", 28, "bold"),
+                                          fg=ACCENT_AMBER, bg=BG_CARD)
+        self.suspect_count_lbl.pack(pady=6)
+
+        # ── LEFT AREA (Video feed + results grid) ─────────────────────
+        left = tk.Frame(cols, bg=BG_DARK)
+        left.pack(side="left", fill="both", expand=True)
+
+        # Live feed
+        feed_wrap = tk.Frame(left, bg=BG_CARD, highlightthickness=1,
+                             highlightbackground=BORDER_BRIGHT)
+        feed_wrap.pack(fill="both", expand=True)
+
+        feed_topbar = tk.Frame(feed_wrap, bg=BG_SURFACE)
+        feed_topbar.pack(fill="x")
+        tk.Label(feed_topbar, text="🔍  SUSPECT SEARCH FEED",
+                 font=("Courier New", 9, "bold"), fg=ACCENT_AMBER,
+                 bg=BG_SURFACE).pack(side="left", padx=12, pady=6)
+        self.suspect_frame_lbl = tk.Label(feed_topbar, text="",
+                                          font=("Courier New", 8),
+                                          fg=TEXT_DIM, bg=BG_SURFACE)
+        self.suspect_frame_lbl.pack(side="right", padx=12, pady=6)
+
+        self.suspect_vid_lbl = tk.Label(feed_wrap, bg="#040810",
+                                        text="[ LOAD A VIDEO AND START SEARCH ]",
+                                        font=self.font_head, fg=TEXT_DIM)
+        self.suspect_vid_lbl.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # Results thumbnail strip at bottom
+        strip_wrap = tk.Frame(left, bg=BG_PANEL, height=110)
+        strip_wrap.pack(fill="x", pady=(8, 0))
+        strip_wrap.pack_propagate(False)
+
+        tk.Label(strip_wrap, text="MATCH THUMBNAILS",
+                 font=("Courier New", 8, "bold"), fg=TEXT_DIM,
+                 bg=BG_PANEL).pack(anchor="w", padx=10, pady=(4, 0))
+
+        strip_scroll_frame = tk.Frame(strip_wrap, bg=BG_PANEL)
+        strip_scroll_frame.pack(fill="both", expand=True, padx=6, pady=4)
+
+        self.suspect_strip_canvas = tk.Canvas(strip_scroll_frame, bg=BG_PANEL,
+                                              height=80, highlightthickness=0)
+        strip_hscroll = tk.Scrollbar(strip_scroll_frame, orient="horizontal",
+                                     command=self.suspect_strip_canvas.xview)
+        self.suspect_strip_canvas.configure(xscrollcommand=strip_hscroll.set)
+        self.suspect_strip_canvas.pack(fill="x")
+        strip_hscroll.pack(fill="x")
+
+        self.suspect_strip_inner = tk.Frame(self.suspect_strip_canvas, bg=BG_PANEL)
+        self.suspect_strip_canvas.create_window((0, 0), window=self.suspect_strip_inner,
+                                                anchor="nw")
+        self.suspect_strip_inner.bind(
+            "<Configure>",
+            lambda e: self.suspect_strip_canvas.configure(
+                scrollregion=self.suspect_strip_canvas.bbox("all"))
+        )
+
+    # ── Suspect Finder helpers ─────────────────────────────────────────
+    def _suspect_clear_placeholder(self, event):
+        current = self.suspect_desc_text.get("1.0", "end-1c")
+        if current.startswith("e.g."):
+            self.suspect_desc_text.delete("1.0", "end")
+
+    def _suspect_load_video(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Video files", "*.mp4 *.avi *.mkv *.mov")])
+        if path:
+            self._suspect_set_source(path)
+
+    def _suspect_set_source(self, source):
+        self.suspect_video_path = source
+        label = "Webcam (live)" if source == 0 else os.path.basename(str(source))
+        self.suspect_source_lbl.config(text=f"✓ {label}", fg=ACCENT_GREEN)
+
+    def _suspect_start(self):
+        if not hasattr(self, 'suspect_video_path') or self.suspect_video_path is None:
+            messagebox.showwarning("No Source", "Please load a video file or select webcam first.")
+            return
+
+        desc = self.suspect_desc_text.get("1.0", "end-1c").strip()
+        if not desc or desc.startswith("e.g."):
+            messagebox.showwarning("No Description", "Please enter a suspect description.")
+            return
+
+        # Reset state
+        self.suspect_is_running = True
+        self.suspect_match_results = []
+        self.suspect_count_lbl.config(text="0")
+        self.suspect_prog["value"] = 0
+        self.suspect_prog_lbl.config(text="0%", fg=ACCENT_CYAN)
+        self.suspect_phase_lbl.config(text="[ SEARCHING... ]", fg=ACCENT_AMBER)
+        self._set_sidebar_status("searching", "Suspect search active")
+
+        # Clear thumbnail strip
+        for w in self.suspect_strip_inner.winfo_children():
+            w.destroy()
+
+        self.suspect_start_btn.config(state="disabled", bg=TEXT_DIM)
+        self.suspect_stop_btn.config(state="normal")
+
+        threshold = self.suspect_thresh_var.get()
+        skip = self.suspect_skip_var.get()
+
+        threading.Thread(
+            target=self._suspect_search_loop,
+            args=(self.suspect_video_path, desc, threshold, skip),
+            daemon=True
+        ).start()
+
+    def _suspect_stop(self):
+        self.suspect_is_running = False
+        self.suspect_start_btn.config(state="normal", bg=ACCENT_AMBER)
+        self.suspect_stop_btn.config(state="disabled")
+        self.suspect_phase_lbl.config(text="[ STOPPED ]", fg=ACCENT_RED)
+        self._set_sidebar_status("idle", "Suspect search stopped")
+
+    def _suspect_search_loop(self, source, description, threshold, skip_frames):
+        """Background thread: streams video, runs YOLO + colour matching per frame."""
+        try:
+            from suspect_finder import parse_description, YOLODetector, find_matches
+        except ImportError:
+            self.after(0, lambda: messagebox.showerror(
+                "Missing Module",
+                "suspect_finder.py not found in the same directory as main.py."))
+            self.after(0, self._suspect_stop)
+            return
+
+        # Parse description once (may call Groq API)
+        self.after(0, lambda: self.suspect_phase_lbl.config(
+            text="[ PARSING DESCRIPTION... ]", fg=ACCENT_CYAN))
+
+        # Pull groq key from env or leave blank for rule-based
+        groq_key = GROQ_API_KEY
+        if groq_key:
+            print("[Suspect Finder] Using Groq LLaMA API for description parsing.")
+        else:
+            print("[Suspect Finder] No GROQ_API_KEY found — using rule-based parser.")
+        try:
+            attributes = parse_description(description, groq_key)
+        except Exception as e:
+            attributes = {}
+
+        detector = YOLODetector(model_size="yolov8n.pt", confidence=0.40)
+
+        cap = cv2.VideoCapture(source)
+        if not cap.isOpened():
+            self.after(0, lambda: messagebox.showerror("Error", "Cannot open video source."))
+            self.after(0, self._suspect_stop)
+            return
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        frame_count = 0
+        match_count = 0
+
+        self.after(0, lambda: self.suspect_phase_lbl.config(
+            text="[ SCANNING FOOTAGE ]", fg=ACCENT_AMBER))
+
+        os.makedirs(SUSPECT_FINDER_DIR, exist_ok=True)
+
+        while cap.isOpened() and self.suspect_is_running:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_count += 1
+
+            # Update progress
+            pct = min(int((frame_count / total_frames) * 99), 99)
+            if frame_count % 10 == 0:
+                self.after(0, lambda p=pct: self._suspect_update_progress(p))
+
+            # Only process every Nth frame
+            if frame_count % skip_frames != 0:
+                continue
+
+            timestamp = frame_count / fps
+
+            # Detect persons in this frame
+            detections = detector.detect_frame(frame, frame_count, timestamp)
+            if not detections:
+                continue
+
+            # Score against description
+            results = find_matches(detections, attributes,
+                                   threshold=threshold, top_n=50)
+
+            # Show annotated frame on screen
+            annotated = self._suspect_annotate(frame.copy(), detections, results)
+            ts_str = f"Frame {frame_count}  |  {int(timestamp//60):02d}:{int(timestamp%60):02d}"
+            self.after(0, lambda f=annotated, t=ts_str: self._suspect_display(f, t))
+
+            # Save new matches and add thumbnails
+            for r in results:
+                match_count += 1
+                crop = r.crop
+                fname = f"suspect_{match_count:04d}_f{r.frame_num}_s{r.overall_score:.2f}.jpg"
+                fpath = os.path.join(SUSPECT_FINDER_DIR, fname)
+                import cv2 as _cv2
+                _cv2.imwrite(fpath, crop)
+                self.suspect_match_results.append(r)
+                self.after(0, lambda c=crop.copy(), sc=r.overall_score:
+                           self._suspect_add_thumbnail(c, sc))
+                self.after(0, lambda n=match_count:
+                           self.suspect_count_lbl.config(text=str(n)))
+
+        cap.release()
+        # Final update
+        self.after(0, lambda: self._suspect_update_progress(100))
+        self.after(0, lambda: self.suspect_phase_lbl.config(
+            text=f"[ COMPLETE — {match_count} MATCH(ES) ]", fg=ACCENT_GREEN))
+        self.after(0, lambda: self._set_sidebar_status(
+            "done", f"Suspect search done — {match_count} found"))
+        # Refresh suspect tab count in Results page
+        if hasattr(self, '_tab_count_labels') and "suspect" in self._tab_count_labels:
+            self.after(0, lambda n=match_count: self._tab_count_labels["suspect"].config(text=str(n)))
+        self.after(0, lambda: self.suspect_start_btn.config(
+            state="normal", bg=ACCENT_AMBER))
+        self.after(0, lambda: self.suspect_stop_btn.config(state="disabled"))
+        self.suspect_is_running = False
+
+    def _suspect_update_progress(self, value):
+        self.suspect_prog["value"] = value
+        color = ACCENT_CYAN if value < 100 else ACCENT_GREEN
+        self.suspect_prog_lbl.config(text=f"{value}%", fg=color)
+
+    def _suspect_annotate(self, frame, detections, matches):
+        """Draw bounding boxes on frame: amber=match, dim=no match."""
+        match_frames = {r.frame_num for r in matches}
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            is_match = any(r.frame_num == det.frame_num and r.bbox == det.bbox
+                           for r in matches)
+            if is_match:
+                match_r = next(r for r in matches
+                               if r.frame_num == det.frame_num and r.bbox == det.bbox)
+                score = match_r.overall_score
+                color = (0, 200, 255) if score >= 0.35 else (0, 140, 255)
+                # Build label with skin tone if available
+                st = getattr(match_r, 'skin_tone_info', {})
+                if st and st.get('tone') and st['tone'] != 'unknown' and st.get('confidence', 0) >= 0.25:
+                    label = f"SUSPECT {score:.0%} | {st['tone']} ({st['confidence']:.0%})"
+                else:
+                    label = f"SUSPECT {score:.0%}"
+                thick = 2
+            else:
+                color = (60, 60, 60)
+                label = ""
+                thick = 1
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
+            if label:
+                cv2.putText(frame, label, (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+        return frame
+
+    def _suspect_display(self, frame, ts_str):
+        self._apply_image_to_label(frame, self.suspect_vid_lbl)
+        self.suspect_frame_lbl.config(text=ts_str)
+
+    def _suspect_add_thumbnail(self, crop, score):
+        """Add a match thumbnail to the horizontal strip."""
+        try:
+            img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            img.thumbnail((72, 80))
+            bg = Image.new("RGB", (72, 80), (20, 20, 30))
+            ox = (72 - img.width) // 2
+            oy = (80 - img.height) // 2
+            bg.paste(img, (ox, oy))
+            img_tk = ImageTk.PhotoImage(bg)
+
+            frame = tk.Frame(self.suspect_strip_inner, bg=BG_PANEL,
+                             highlightthickness=1,
+                             highlightbackground=ACCENT_AMBER if score >= 0.35 else BORDER)
+            frame.pack(side="left", padx=3, pady=2)
+
+            lbl = tk.Label(frame, image=img_tk, bg=BG_PANEL)
+            lbl.image = img_tk
+            lbl.pack()
+
+            score_lbl = tk.Label(frame, text=f"{score:.0%}",
+                                 font=("Courier New", 7, "bold"),
+                                 fg=ACCENT_AMBER if score >= 0.35 else TEXT_SECONDARY,
+                                 bg=BG_PANEL)
+            score_lbl.pack()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

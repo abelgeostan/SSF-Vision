@@ -8,3 +8,12 @@ videos
 ./results
 results
 yolo8n.pt
+.env
+./matches
+matches
+./model
+model
+./zone_alerts
+zone_alerts
+./suspect_results
+suspect_results

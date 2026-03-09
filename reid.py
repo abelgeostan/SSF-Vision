@@ -104,10 +104,12 @@ class ReIDEngine:
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
         return annotated, current_data
 
-    def search_video(self, video_path, gallery, progress_callback, match_callback, stop_check, save_dir="matches"):
+    def search_video(self, video_path, gallery, progress_callback, match_callback, stop_check, save_dir="matches", frame_skip=5):
         """
         Search for matches in video.
-        stop_check: A callable that returns True if search should stop (e.g., lambda: not self.is_running)
+        stop_check:  A callable that returns True if search should stop.
+        frame_skip:  Process every Nth frame only (default=5). Progress tracking
+                     still counts all frames so the progress bar stays accurate.
         """
         os.makedirs(save_dir, exist_ok=True)
         cap = cv2.VideoCapture(video_path)
@@ -132,12 +134,18 @@ class ReIDEngine:
             if stop_check():
                 print("[ReID] Background search interrupted by user.")
                 break
-                
+
             ret, frame = cap.read()
             if not ret: break
             count += 1
+
+            # Progress update (based on all frames, not just processed ones)
             if count % 10 == 0:
                 progress_callback(min(int((count / total_frames) * 99), 99))
+
+            # Skip non-sampled frames — saves ~80% of YOLO + ReID compute
+            if count % frame_skip != 0:
+                continue
 
             results = self.detector(frame, classes=[0], verbose=False)[0]
             detections = sv.Detections.from_ultralytics(results)
