@@ -17,3 +17,7 @@ model
 zone_alerts
 ./suspect_results
 suspect_results
+analytics_output
+./analytics_output
+evidence_clips
+./evidence_clips

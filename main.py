@@ -174,9 +174,9 @@ class SentinelVision(tk.Tk):
             ("ReID",      "◉", "Person Re-ID"),
             ("Analytics", "📊", "People Analytics"),
             ("Zones",     "🚫", "Restricted Zones"),
-            ("Results",   "▦", "Match Results"),
             ("Suspect",   "🔍", "Suspect Finder"),
             ("Anomaly",   "⚠", "Anomaly Detection"),
+            ("Results",   "▦", "Match Results"),
         ]
         self.nav_btns = {}
         for key, icon, label in nav_items:
@@ -420,6 +420,7 @@ class SentinelVision(tk.Tk):
             ("Open Heatmap Dashboard", "Analytics", ACCENT_AMBER),
             ("Configure Security Zones", "Zones", ACCENT_RED),
             ("Suspect Finder", "Suspect", ACCENT_BLUE),
+            ("Anomaly Detection", "Anomaly", ACCENT_GREEN),
             ("View Search Results", "Results", TEXT_SECONDARY)
         ]
 
@@ -1409,7 +1410,7 @@ class SentinelVision(tk.Tk):
             import anomaly as _am
             from anomaly import (select_device, CONF_THRESHOLD, SAVE_DIR,
                                   FALL_SAVE_DIR, PanicCrowdDetector,
-                                  FallDetector, LoiteringDetector,
+                                  FallFightDetector, LoiteringDetector,
                                   CSVLogger, UI)
             from ultralytics import YOLO
             import numpy as np
@@ -1447,7 +1448,7 @@ class SentinelVision(tk.Tk):
             os.makedirs(FALL_SAVE_DIR, exist_ok=True)
 
             panic_det  = PanicCrowdDetector(fps, logger, roi, SAVE_DIR, W, H)
-            fall_det   = FallDetector(fps, logger, FALL_SAVE_DIR)
+            fall_det   = FallFightDetector(fps, logger, FALL_SAVE_DIR)
             loiter_det = LoiteringDetector(fps, logger, roi, SAVE_DIR, W, H)
 
             event_counts  = {k: 0 for k in self.anomaly_counters}
